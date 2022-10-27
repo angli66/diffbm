@@ -103,3 +103,17 @@ class NCC(torch.nn.Module):
         result.div_(std + trivial_term)
 
         return result
+
+class SoftArgmax1D(torch.nn.Module):
+    def __init__(self, base_index=0, step_size=1):
+        super().__init__()
+        self.base_index = base_index
+        self.step_size = step_size
+        self.softmax = torch.nn.Softmax(dim=1)
+
+    def forward(self, x):
+        smax = self.softmax(x)
+        end_index = self.base_index + x.shape[1] * self.step_size
+        indices = torch.arange(start=self.base_index, end=end_index, step=self.step_size).to(x)
+
+        return torch.matmul(smax, indices)
