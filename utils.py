@@ -1,15 +1,14 @@
-import numpy as np
 import torch
 from torch.nn import functional as F
 
-trivial_term = 1e-8
+TRIVIAL_TERM = 1e-8
 
 def pad_img(img, block_size):
     half = block_size // 2
-    padding = np.zeros((img.shape[0], half))
-    img = np.concatenate([padding, img, padding], axis=1)
-    padding = np.zeros((half, img.shape[1]))
-    img = np.concatenate([padding, img, padding], axis=0)
+    padding = torch.zeros((img.shape[0], half)).to(img)
+    img = torch.cat([padding, img, padding], dim=1)
+    padding = torch.zeros((half, img.shape[1])).to(img)
+    img = torch.cat([padding, img, padding], dim=0)
 
     return img
 
@@ -54,7 +53,7 @@ def patch_std(image, patch_shape):
     Returns:
         Tensor same size as the image, with local standard deviations computed independently for each channel.
     """
-    return (patch_mean(image**2, patch_shape) - patch_mean(image, patch_shape)**2 + trivial_term).sqrt()
+    return (patch_mean(image**2, patch_shape) - patch_mean(image, patch_shape)**2 + TRIVIAL_TERM).sqrt()
 
 
 def channel_normalize(template):
@@ -63,7 +62,7 @@ def channel_normalize(template):
     """
     reshaped_template = template.clone().view(template.shape[0], template.shape[1], -1)
     reshaped_template.sub_(reshaped_template.mean(dim=-1, keepdim=True))
-    reshaped_template.div_(reshaped_template.std(dim=-1, keepdim=True, unbiased=False) + trivial_term)
+    reshaped_template.div_(reshaped_template.std(dim=-1, keepdim=True, unbiased=False) + TRIVIAL_TERM)
 
     return reshaped_template.view_as(template)
 
@@ -72,7 +71,7 @@ class NCC(torch.nn.Module):
     """
     Computes the Zero-Normalized Cross-Correlation between an image and a template.
     """
-    def __init__(self, template, keep_channels=False):
+    def __init__(self, template):
         super().__init__()
 
         _, channels, *template_shape = template.shape
@@ -100,7 +99,7 @@ class NCC(torch.nn.Module):
         result = self.conv_f(inputs_reshaped, self.normalized_template, padding='valid', groups=batch_size)
         result = result.view(batch_size, channel, result.shape[2], result.shape[3])
         std = patch_std(inputs, self.normalized_template.shape[1:])
-        result.div_(std + trivial_term)
+        result.div_(std + TRIVIAL_TERM)
 
         return result
 
@@ -117,3 +116,57 @@ class SoftArgmax1D(torch.nn.Module):
         indices = torch.arange(start=self.base_index, end=end_index, step=self.step_size).to(x)
 
         return torch.matmul(smax, indices)
+
+def block_matching(img_l, img_r, min_disp, max_disp, block_size, temperature, batch_size):
+    # Compute matching cost array
+    left_padded = pad_img(img_l, block_size)[..., None]
+    left_padded = torch.Tensor(left_padded).permute(2, 0, 1).to(img_l)
+    right_padded = pad_img(img_r, block_size)[..., None]
+    right_padded = torch.Tensor(right_padded).permute(2, 0, 1).to(img_r)
+
+    h, w = img_l.shape
+    half = block_size // 2
+    matching_cost = []
+    for i in range(h // batch_size):
+        kernels = []
+        inputs = []
+        for y in range(i * batch_size, (i + 1) * batch_size):
+            for x in range(max_disp, w):
+                kernel = left_padded[:, y:y+2*half+1, x:x+2*half+1]
+                input_arr = right_padded[:, y:y+2*half+1, x-max_disp:x-min_disp+2*half+1]
+                kernels.append(kernel)
+                inputs.append(input_arr)
+        kernels = torch.stack(kernels)
+        inputs = torch.stack(inputs)
+        ncc = NCC(kernels)
+        result = ncc(inputs).squeeze().flip(1)
+        assert result.isnan().any() == False # If true, increase TRIVIAL_TERM defined at top
+        matching_cost.append(result)
+    
+    ## Height not divisible by batch size
+    if h % batch_size != 0:
+        kernels = []
+        inputs = []
+        for y in range((h // batch_size) * batch_size, h):
+            for x in range(max_disp, w):
+                kernel = left_padded[:, y:y+2*half+1, x:x+2*half+1]
+                input_arr = right_padded[:, y:y+2*half+1, x-max_disp:x-min_disp+2*half+1]
+                kernels.append(kernel)
+                inputs.append(input_arr)
+        kernels = torch.stack(kernels)
+        inputs = torch.stack(inputs)
+        ncc = NCC(kernels)
+        result = ncc(inputs).squeeze().flip(1)
+        assert result.isnan().any() == False # If true, increase TRIVIAL_TERM defined at top
+        matching_cost.append(result)
+
+    matching_cost = torch.cat(matching_cost, axis=0)
+
+    # Softargmax
+    softargmax = SoftArgmax1D(base_index=min_disp)
+    disp = softargmax(matching_cost * temperature)
+
+    # Reshape to img
+    disp = disp.reshape(h, w - max_disp)
+
+    return disp
