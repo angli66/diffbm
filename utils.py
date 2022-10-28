@@ -120,9 +120,9 @@ class SoftArgmax1D(torch.nn.Module):
 def block_matching(img_l, img_r, min_disp, max_disp, block_size, temperature, batch_size):
     # Compute matching cost array
     left_padded = pad_img(img_l, block_size)[..., None]
-    left_padded = torch.Tensor(left_padded).permute(2, 0, 1).to(img_l)
+    left_padded = left_padded.permute(2, 0, 1).to(img_l)
     right_padded = pad_img(img_r, block_size)[..., None]
-    right_padded = torch.Tensor(right_padded).permute(2, 0, 1).to(img_r)
+    right_padded = right_padded.permute(2, 0, 1).to(img_r)
 
     h, w = img_l.shape
     half = block_size // 2
